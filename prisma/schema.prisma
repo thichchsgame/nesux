@@ -1,0 +1,697 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ================= AUTH (NextAuth.js / Auth.js) — GIỮ NGUYÊN, KHÔNG ĐỔI =================
+
+model User {
+  id               String     @id @default(cuid())
+  name             String?
+  email            String     @unique
+  emailVerified    DateTime?
+  image            String?
+  password         String?
+  phone            String?
+  role             Role       @default(CUSTOMER)
+  status           UserStatus @default(ACTIVE)
+  suspendedUntil   DateTime?
+  suspensionReason String?
+  lastLoginAt      DateTime?
+
+  accountActionsReceived  AccountAction[] @relation("TargetUser")
+  accountActionsPerformed AccountAction[] @relation("ActingAdmin")
+
+  accounts Account[]
+  sessions Session[]
+
+  // ---- quan hệ nghiệp vụ thêm ở Phase 2 (không đổi field cũ ở trên) ----
+  addresses          Address[]
+  orders             Order[]
+  reviews            Review[]          @relation("ReviewAuthor")
+  reviewRepliesGiven Review[]          @relation("ReviewAdminReplier")
+  wishlist           Wishlist[]
+  cart               Cart?
+  tryOnRequests      TryOnRequest[]
+  passwordResetTokens PasswordResetToken[]
+  questionsAsked     ProductQuestion[] @relation("QuestionAuthor")
+  questionsAnswered  ProductQuestion[] @relation("QuestionAnswerer")
+  supportTicketsAsCustomer SupportTicket[] @relation("SupportTicketCustomer")
+  supportTicketsAssigned   SupportTicket[] @relation("SupportTicketAssignee")
+  supportMessagesSent      SupportMessage[] @relation("SupportMessageSender")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("users")
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum Role {
+  CUSTOMER
+  ADMIN
+}
+
+enum AccountActionType {
+  SUSPEND
+  UNSUSPEND
+}
+
+model AccountAction {
+  id        String            @id @default(cuid())
+  userId    String
+  user      User              @relation("TargetUser", fields: [userId], references: [id], onDelete: Cascade)
+  action    AccountActionType
+  adminId   String
+  admin     User              @relation("ActingAdmin", fields: [adminId], references: [id], onDelete: Cascade)
+  reason    String?
+  createdAt DateTime          @default(now())
+  expiresAt DateTime?
+
+  @@map("account_actions")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verificationtokens")
+}
+
+// ================= RESET MẬT KHẨU =================
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+// ================= CATALOG (Phase 2 — code logic ngay) =================
+
+enum ProductStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+model Category {
+  id          String  @id @default(cuid())
+  name        String
+  slug        String  @unique
+  description String?
+  image       String?
+
+  // danh mục cha/con (VD: Áo → Áo khoác), không phải danh mục phẳng
+  parentId String?
+  parent   Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children Category[] @relation("CategoryHierarchy")
+
+  products Product[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([parentId])
+  @@map("categories")
+}
+
+model Product {
+  id             String        @id @default(cuid())
+  name           String
+  slug           String        @unique
+  description    String?       @db.Text
+  status         ProductStatus @default(DRAFT)
+  basePrice      Decimal       @db.Decimal(12, 2)
+  compareAtPrice Decimal?      @db.Decimal(12, 2) // giá gạch ngang khi sale
+  attributes     Json?
+  tags           String[]      @default([])
+  heroTagline    String?
+
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  variants      ProductVariant[]
+  images        ProductImage[]
+  reviews       Review[]
+  wishlistedBy  Wishlist[]
+  tryOnRequests TryOnRequest[]
+  questions     ProductQuestion[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Cột tsvector do Postgres tự sinh (generated column), tạo qua raw SQL ở migration riêng
+  // (xem prisma/migrations/..._add_product_search_vector/migration.sql).
+  // Khai báo ở đây để Prisma biết cột này tồn tại — tránh bị coi là "drift" và bị xoá ở lần migrate sau.
+  // KHÔNG đọc/ghi qua Prisma Client bình thường, chỉ dùng trong $queryRaw ở lib/products.ts.
+  searchVector Unsupported("tsvector")?
+
+  @@index([categoryId])
+  @@index([status])
+  @@map("products")
+}
+
+model ProductVariant {
+  id            String   @id @default(cuid())
+  productId     String
+  product       Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  sku           String   @unique
+  size          String?
+  color         String?
+  colorHex      String?
+  priceOverride Decimal? @db.Decimal(12, 2) // VD: size XXL đắt hơn giá base
+  stock         Int      @default(0)
+  weightGrams   Int      @default(500)
+
+  images     ProductImage[]
+  cartItems  CartItem[]
+  orderItems OrderItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([productId, size, color])
+  @@map("product_variants")
+}
+
+model ProductImage {
+  id        String  @id @default(cuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  // ảnh có thể gắn riêng theo biến thể (áo màu đen có ảnh khác màu trắng); null = ảnh dùng chung
+  variantId String?
+  variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  url      String
+  altText  String?
+  position Int     @default(0)
+
+  @@index([productId])
+  @@index([variantId])
+  @@map("product_images")
+}
+
+// ================= GIỎ HÀNG (khung schema — logic code ở Phase 3) =================
+
+model Cart {
+  id String @id @default(cuid())
+
+  // hỗ trợ cả khách vãng lai (sessionToken) lẫn user đã đăng nhập — đúng 1 trong 2
+  userId       String? @unique
+  user         User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionToken String? @unique
+
+  items CartItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("carts")
+}
+
+model CartItem {
+  id     String @id @default(cuid())
+  cartId String
+  cart   Cart   @relation(fields: [cartId], references: [id], onDelete: Cascade)
+
+  variantId String
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  quantity Int @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([cartId, variantId])
+  @@map("cart_items")
+}
+
+// ================= ĐỊA CHỈ (khung schema — logic code ở Phase 3/5) =================
+
+model Address {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  fullName   String
+  phone      String
+  line1      String
+  line2      String?
+  ward       String?
+  district   String?
+  city       String
+  postalCode String?
+  country    String  @default("VN")
+  isDefault  Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@map("addresses")
+}
+
+// ================= ĐƠN HÀNG & THANH TOÁN (khung schema — logic code ở Phase 3/4) =================
+
+enum OrderStatus {
+  PENDING
+  PAID
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+enum ShippingMethod {
+  STANDARD
+  EXPRESS
+}
+
+model Order {
+  id          String      @id @default(cuid())
+  orderNumber String      @unique // mã đơn hàng human-readable, hiển thị cho khách
+  status      OrderStatus @default(PENDING)
+
+  // guest checkout: userId có thể null, giữ email để liên hệ
+  userId     String?
+  user       User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+  guestEmail String?
+
+  subtotal       Decimal @db.Decimal(12, 2)
+  shippingFee    Decimal @default(0) @db.Decimal(12, 2)
+  shippingCarrierFee Decimal? @db.Decimal(12, 2)
+  shippingMethod     ShippingMethod @default(STANDARD)
+  discountAmount Decimal @default(0) @db.Decimal(12, 2)
+  totalAmount    Decimal @db.Decimal(12, 2)
+
+  // snapshot coupon, không phụ thuộc Coupon còn tồn tại/còn hiệu lực hay không
+  couponId   String?
+  coupon     Coupon? @relation(fields: [couponId], references: [id], onDelete: SetNull)
+  couponCode String?
+
+  // SNAPSHOT địa chỉ giao hàng tại thời điểm đặt — user có thể sửa/xoá Address gốc sau này
+  // nhưng đơn hàng cũ phải giữ nguyên. addressId chỉ để tham chiếu nguồn gốc (có thể null).
+  shippingAddressId  String?
+  shippingFullName   String
+  shippingPhone      String
+  shippingLine1      String
+  shippingLine2      String?
+  shippingWard       String?
+  shippingDistrict   String?
+  shippingCity       String
+  shippingPostalCode String?
+  shippingCountry    String  @default("VN")
+
+  items    OrderItem[]
+  payments Payment[]
+  trackingCode String?
+  statusEvents OrderStatusEvent[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@map("orders")
+}
+
+model ShippingSetting {
+  id                String   @id @default(cuid())
+  freeShipThreshold Int      @default(1000000)
+  updatedAt         DateTime @updatedAt
+
+  @@map("shipping_settings")
+}
+
+model OrderItem {
+  id      String @id @default(cuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  // nullable + SetNull: nếu variant bị xoá sau này, đơn hàng cũ vẫn đọc được nhờ snapshot bên dưới
+  variantId String?
+  variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  // SNAPSHOT giá + thông tin tại thời điểm mua — không tham chiếu giá sống của Product/Variant
+  productNameSnapshot String
+  variantSkuSnapshot  String
+  sizeSnapshot        String?
+  colorSnapshot       String?
+  unitPriceSnapshot   Decimal @db.Decimal(12, 2)
+  // Snapshot cân nặng lúc đặt hàng; null dành cho đơn được tạo trước migration này.
+  weightGrams         Int?
+  quantity            Int
+  lineTotal           Decimal @db.Decimal(12, 2)
+
+  reviews Review[]
+
+  @@index([orderId])
+  @@map("order_items")
+}
+
+model OrderStatusEvent {
+  id        String      @id @default(cuid())
+  orderId   String
+  order     Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status    OrderStatus
+  note      String?
+  createdAt DateTime    @default(now())
+
+  @@index([orderId])
+  @@map("order_status_events")
+}
+
+enum PaymentProvider {
+  STRIPE
+  VNPAY
+  MOMO
+  COD
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+model Payment {
+  id      String @id @default(cuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  // tách riêng khỏi Order để hỗ trợ nhiều lần thử thanh toán / nhiều cổng
+  provider    PaymentProvider
+  providerRef String? // charge id / transaction id phía cổng thanh toán
+  status      PaymentStatus   @default(PENDING)
+  amount      Decimal         @db.Decimal(12, 2)
+  currency    String          @default("VND")
+
+  rawPayload     Json? // lưu payload webhook thô để đối soát
+  idempotencyKey String @unique // chống xử lý webhook trùng
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orderId])
+  @@map("payments")
+}
+
+// ================= MÃ GIẢM GIÁ (khung schema — logic code ở Phase 3) =================
+
+enum CouponType {
+  PERCENTAGE
+  FIXED
+}
+
+model Coupon {
+  id    String     @id @default(cuid())
+  code  String     @unique
+  type  CouponType
+  value Decimal    @db.Decimal(12, 2) // % hoặc số tiền cố định tuỳ type
+
+  minOrderAmount    Decimal? @db.Decimal(12, 2)
+  maxDiscountAmount Decimal? @db.Decimal(12, 2) // chặn trần giảm giá % quá lớn
+
+  usageLimit        Int? // tổng số lần dùng được, null = không giới hạn
+  usageLimitPerUser Int? // số lần dùng được / user, null = không giới hạn
+  usedCount         Int  @default(0)
+
+  startsAt  DateTime?
+  expiresAt DateTime?
+  isActive  Boolean   @default(true)
+
+  orders Order[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("coupons")
+}
+
+enum ReviewStatus {
+  PUBLISHED
+  HIDDEN
+}
+
+enum ReviewMediaType {
+  IMAGE
+  VIDEO
+}
+
+model ReviewMedia {
+  id       String          @id @default(cuid())
+  reviewId String
+  review   Review          @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  type     ReviewMediaType @default(IMAGE)
+  url      String
+  position Int             @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([reviewId])
+  @@map("review_media")
+}
+
+model Review {
+  id        String  @id @default(cuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User    @relation("ReviewAuthor", fields: [userId], references: [id], onDelete: Cascade)
+
+  orderItemId String?
+  orderItem   OrderItem? @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
+
+  // Snapshot tại thời điểm tạo review — không phụ thuộc OrderItem còn tồn tại.
+  variantSkuSnapshot String
+  colorSnapshot      String?
+  sizeSnapshot       String?
+
+  rating  Int
+  comment String?      @db.Text
+  status  ReviewStatus @default(PUBLISHED)
+
+  isVerifiedPurchase Boolean @default(true)
+
+  editedAt DateTime?
+
+  media ReviewMedia[]
+
+  adminReply       String?   @db.Text
+  adminRepliedAt   DateTime?
+  adminRepliedById String?
+  adminRepliedBy   User?     @relation("ReviewAdminReplier", fields: [adminRepliedById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([productId, userId, variantSkuSnapshot])
+  @@index([productId])
+  @@index([status])
+  @@index([orderItemId])
+  @@map("reviews")
+}
+
+model Wishlist {
+  id        String  @id @default(cuid())
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, productId])
+  @@map("wishlist")
+}
+
+// ================= AI TRY-ON (khung schema — logic code ở Phase 4) =================
+
+enum TryOnProvider {
+  SEGMIND
+  FASHNAI
+}
+
+enum TryOnStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+}
+
+model TryOnRequest {
+  id String @id @default(cuid())
+
+  // nullable: flow cho phép thử đồ không cần đăng nhập, chỉ lưu lịch sử nếu đã đăng nhập
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  provider      TryOnProvider @default(SEGMIND) // adapter pattern: Segmind → FASHN.ai sau này
+  providerJobId String?
+  status        TryOnStatus   @default(PENDING)
+
+  inputImageUrl  String
+  resultImageUrl String?
+  depthMapUrl    String? // Phase 4b: parallax 2.5D
+  errorMessage   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@map("tryon_requests")
+}
+
+// ================= PRODUCT Q&A (Phase 6) =================
+
+enum ProductQuestionStatus {
+  PUBLISHED
+  HIDDEN
+}
+
+enum SupportTicketTopic {
+  GENERAL
+  ORDER
+  PAYMENT
+  ACCOUNT
+}
+
+enum SupportTicketStatus {
+  OPEN
+  RESOLVED
+}
+
+enum SupportTicketPriority {
+  NORMAL
+  HIGH
+}
+
+enum SupportSenderRole {
+  CUSTOMER
+  ADMIN
+}
+
+model ProductQuestion {
+  id        String  @id @default(cuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User    @relation("QuestionAuthor", fields: [userId], references: [id], onDelete: Cascade)
+
+  question String                @db.Text
+  status   ProductQuestionStatus @default(PUBLISHED)
+  editedAt DateTime?
+
+  answer       String?   @db.Text
+  answeredAt   DateTime?
+  answeredById String?
+  answeredBy   User?     @relation("QuestionAnswerer", fields: [answeredById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([productId, status])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("product_questions")
+}
+
+model SupportTicket {
+  id     String  @id @default(cuid())
+  userId String?
+  user   User?   @relation("SupportTicketCustomer", fields: [userId], references: [id], onDelete: SetNull)
+  guestEmail String?
+
+  topic SupportTicketTopic
+
+  status   SupportTicketStatus   @default(OPEN)
+  priority SupportTicketPriority @default(NORMAL)
+
+  assignedAdminId String?
+  assignedAdmin   User?   @relation("SupportTicketAssignee", fields: [assignedAdminId], references: [id], onDelete: SetNull)
+
+  lastMessageAt   DateTime          @default(now())
+  lastMessageFrom SupportSenderRole @default(CUSTOMER)
+  adminReadAt     DateTime?
+
+  messages SupportMessage[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([userId])
+  @@map("support_tickets")
+}
+
+model SupportMessage {
+  id       String        @id @default(cuid())
+  ticketId String
+  ticket   SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  senderRole   SupportSenderRole
+  senderUserId String?
+  senderUser   User?   @relation("SupportMessageSender", fields: [senderUserId], references: [id], onDelete: SetNull)
+
+  body String @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([ticketId])
+  @@map("support_messages")
+}
